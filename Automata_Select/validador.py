@@ -1,6 +1,13 @@
+import string
+
 class ValidadorLexico:
     def __init__(self):
         self.alfabeto = set()
+
+    def cargar_alfabeto_sql(self):
+        letras_y_digitos = string.ascii_letters + string.digits
+        simbolos_especiales = " ,;()*=<>_;"
+        self.alfabeto = set(letras_y_digitos + simbolos_especiales)
 
     def cargar_alfabeto(self, entrada_alfabeto):
         entrada_limpia = entrada_alfabeto.replace(',', ' ')
