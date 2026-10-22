@@ -6,3 +6,6 @@ if __name__ == '__main__':
     ventana=tk.Tk()
     Aplicacion(ventana)
     ventana.mainloop()
+
+
+este es mi cambio .Martín Q
