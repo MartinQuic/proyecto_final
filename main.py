@@ -8,4 +8,3 @@ if __name__ == '__main__':
     ventana.mainloop()
 
 
-este es mi cambio .Martín Q
