@@ -1,73 +1,291 @@
+"""Validador educativo de consultas SELECT; no ejecuta sentencias SQL."""
 import re
+from dataclasses import dataclass
 
-# Subconjunto pedagógico de SELECT. No ejecuta SQL ni utiliza eval.
-TOKENS = re.compile(r"'(?:''|[^'])*'|\d+(?:\.\d+)?|>=|<=|!=|<>|[(),;.*=<>]|[A-Za-z_][A-Za-z_0-9]*|\S")
 REGLAS = [
- ('SQL_01','SELECT básico'),('SQL_02','Columnas múltiples'),('SQL_03','Comodín *'),
- ('SQL_04','WHERE y comparación'),('SQL_05','AND / OR'),('SQL_06','ORDER BY'),
- ('SQL_07','GROUP BY'),('SQL_08','HAVING'),('SQL_09','INNER JOIN'),('SQL_10','LIMIT')
+    ('SQL_01', 'SELECT básico'), ('SQL_02', 'Columnas múltiples'),
+    ('SQL_03', 'Comodín *'), ('SQL_04', 'WHERE y comparación'),
+    ('SQL_05', 'AND / OR'), ('SQL_06', 'ORDER BY'),
+    ('SQL_07', 'GROUP BY'), ('SQL_08', 'HAVING'),
+    ('SQL_09', 'INNER JOIN'), ('SQL_10', 'LIMIT'),
 ]
-COMPARADORES={'=','>','<','>=','<=','!=','<>'}
-class ErrorSQL(ValueError):
- def __init__(self,msg,codigo='SINTAXIS_SQL'):
-  super().__init__(msg);self.codigo=codigo
+COMPARADORES = {'=', '>', '<', '>=', '<=', '!=', '<>'}
+PALABRAS = {
+    'SELECT', 'FROM', 'WHERE', 'INNER', 'JOIN', 'ON', 'AS', 'ORDER',
+    'GROUP', 'BY', 'HAVING', 'LIMIT', 'AND', 'OR', 'ASC', 'DESC'
+}
+LEX = re.compile(
+    r"(?P<WS>\s+)|(?P<LINE_COMMENT>--[^\n]*)|(?P<BLOCK_COMMENT>/\*[\s\S]*?\*/)|"
+    r"(?P<STRING>'(?:''|[^'])*')|(?P<NUM>\d+(?:\.\d+)?)|"
+    r"(?P<OP>>=|<=|!=|<>)|(?P<ID>[A-Za-z_][A-Za-z_0-9]*)|"
+    r"(?P<PUNC>[(),;.*=<>+/-])|(?P<OTHER>.)"
+)
 
-def validar(sql,activas):
- try:
-  tokens=TOKENS.findall(sql.strip()); t=[x.upper() if not x.startswith("'") else x for x in tokens]
-  i=0; usadas={'SQL_01'}
-  def peek(): return t[i] if i<len(t) else None
-  def take(value=None):
-   nonlocal i
-   if i>=len(t) or (value is not None and t[i]!=value):
-    raise ErrorSQL('Se esperaba '+(value or 'un token'))
-   out=t[i];i+=1;return out
-  def identifier():
-   first=peek()
-   if first is None or not re.fullmatch(r'[A-Z_][A-Z_0-9]*',first) or first in {'SELECT','FROM','WHERE','JOIN','INNER','ON','ORDER','GROUP','BY','HAVING','LIMIT','AND','OR'}:
-    raise ErrorSQL('Se esperaba un identificador')
-   take()
-   if peek()=='.': take('.');identifier()
-  def column():
-   if peek()=='*': usadas.add('SQL_03');take('*')
-   else: identifier()
-  def value():
-   if peek() is None: raise ErrorSQL('Falta valor')
-   if re.fullmatch(r"'(?:''|[^'])*'|\d+(?:\.\d+)?",peek()): take()
-   else: identifier()
-  def condition():
-   identifier(); op=take()
-   if op not in COMPARADORES: raise ErrorSQL('Se esperaba operador de comparación')
-   value()
-   while peek() in ('AND','OR'):
-    usadas.add('SQL_05');take();identifier();op=take()
-    if op not in COMPARADORES:raise ErrorSQL('Comparador inválido')
-    value()
-  take('SELECT');column()
-  while peek()==',': usadas.add('SQL_02');take(',');column()
-  take('FROM');identifier()
-  if peek()=='INNER':
-   usadas.add('SQL_09');take('INNER');take('JOIN');identifier();take('ON');identifier();take('=');identifier()
-  if peek()=='WHERE': usadas.add('SQL_04');take();condition()
-  if peek()=='GROUP':
-   usadas.add('SQL_07');take();take('BY');identifier()
-   while peek()==',': take();identifier()
-  if peek()=='HAVING':
-   usadas.add('SQL_08')
-   if 'SQL_07' not in usadas: raise ErrorSQL('HAVING requiere GROUP BY')
-   take();identifier();op=take()
-   if op not in COMPARADORES:raise ErrorSQL('Comparador HAVING inválido')
-   value()
-  if peek()=='ORDER':
-   usadas.add('SQL_06');take();take('BY');identifier()
-   if peek() in ('ASC','DESC'):take()
-  if peek()=='LIMIT':
-   usadas.add('SQL_10');take();n=take()
-   if not re.fullmatch(r'\d+',n):raise ErrorSQL('LIMIT requiere un entero')
-  if peek()==';':take()
-  if peek() is not None:raise ErrorSQL('Token inesperado: '+str(peek()))
-  desactivadas=sorted(usadas-set(activas))
-  if desactivadas:raise ErrorSQL('Reglas inactivas: '+', '.join(desactivadas),'REGLA_INACTIVA')
-  return {'valido':True,'codigo':'OK','mensaje':'Consulta válida para el subconjunto SQL definido','reglas_usadas':sorted(usadas)}
- except ErrorSQL as ex:
-  return {'valido':False,'codigo':ex.codigo,'mensaje':str(ex),'reglas_usadas':sorted(locals().get('usadas',set()))}
+@dataclass
+class Token:
+    value: str
+    start: int
+    end: int
+    kind: str
+
+class ErrorSQL(ValueError):
+    def __init__(self, mensaje, token=None, codigo='SINTAXIS_SQL'):
+        super().__init__(mensaje)
+        self.token = token
+        self.codigo = codigo
+
+def _ubicacion(texto, indice):
+    return {
+        'linea': texto.count('\n', 0, indice) + 1,
+        'columna': indice - texto.rfind('\n', 0, indice),
+        'posicion': indice,
+    }
+
+def _tokens(texto):
+    resultado = []
+    for m in LEX.finditer(texto):
+        tipo = m.lastgroup
+        if tipo in ('WS', 'LINE_COMMENT', 'BLOCK_COMMENT'):
+            continue
+        t = Token(m.group(), m.start(), m.end(), tipo)
+        if tipo == 'OTHER':
+            raise ErrorSQL('Carácter no reconocido: ' + t.value, t, 'LEXICO_SQL')
+        resultado.append(t)
+    return resultado
+
+class Parser:
+    def __init__(self, tokens, final):
+        self.t = tokens
+        self.i = 0
+        self.final = final
+        self.usadas = {'SQL_01'}
+        self.tablas = set()
+        self.aliases = set()
+        self.referencias = []
+
+    def actual(self):
+        return self.t[self.i] if self.i < len(self.t) else None
+
+    def palabra(self):
+        x = self.actual()
+        return x.value.upper() if x else None
+
+    def tomar(self, valor=None):
+        x = self.actual()
+        if x is None or (valor is not None and x.value.upper() != valor):
+            raise ErrorSQL('Se esperaba ' + (valor or 'un token'),
+                        x or Token('', self.final, self.final, 'EOF'))
+        self.i += 1
+        return x
+
+    def aceptar(self, valor):
+        if self.palabra() == valor:
+            self.tomar()
+            return True
+        return False
+
+    def identificador(self):
+        x = self.actual()
+        if x is None or x.kind != 'ID' or x.value.upper() in PALABRAS:
+            raise ErrorSQL('Se esperaba un identificador',
+                        x or Token('', self.final, self.final, 'EOF'))
+        return self.tomar()
+
+    def columna(self, admitir_comodin=True):
+        x = self.actual()
+        if admitir_comodin and self.aceptar('*'):
+            self.usadas.add('SQL_03')
+            return
+        if x is None:
+            raise ErrorSQL('Se esperaba columna', Token('', self.final, self.final, 'EOF'))
+        self.identificador()
+        if self.aceptar('('):
+            if self.aceptar('*'):
+                self.usadas.add('SQL_03')
+            else:
+                self.columna(False)
+            self.tomar(')')
+        elif self.aceptar('.'):
+            self.referencias.append(x)
+            if self.aceptar('*'):
+                self.usadas.add('SQL_03')
+            else:
+                self.identificador()
+
+    def origen(self):
+        nombre = self.identificador()
+        if self.aceptar('.'):
+            nombre = self.identificador()
+        tabla = nombre.value.casefold()
+        if tabla in self.tablas or tabla in self.aliases:
+            raise ErrorSQL('Tabla o alias duplicado: ' + nombre.value, nombre, 'ALIAS_DUPLICADO')
+        self.tablas.add(tabla)
+        self.aceptar('AS')
+        x = self.actual()
+        if x and x.kind == 'ID' and x.value.upper() not in PALABRAS:
+            alias = self.identificador()
+            a = alias.value.casefold()
+            if a in self.aliases or (a in self.tablas and a != tabla):
+                raise ErrorSQL('Alias duplicado: ' + alias.value, alias, 'ALIAS_DUPLICADO')
+            self.aliases.add(a)
+            self.tablas.discard(tabla)
+            self.tablas.add(a)
+        return nombre
+
+    def valor(self):
+        x = self.actual()
+        if x is None:
+            raise ErrorSQL('Falta un valor', Token('', self.final, self.final, 'EOF'))
+        if x.kind in ('STRING', 'NUM'):
+            self.tomar()
+        else:
+            self.columna(False)
+
+    def condicion(self):
+        self.comparacion()
+        while self.palabra() in ('AND', 'OR'):
+            self.usadas.add('SQL_05')
+            self.tomar()
+            self.comparacion()
+
+    def comparacion(self, en_join=False):
+        izquierda = self.actual()
+        if en_join and izquierda is not None and izquierda.kind == 'ID':
+            siguiente = self.t[self.i + 1] if self.i + 1 < len(self.t) else None
+            if siguiente is None or siguiente.value != '.':
+                raise ErrorSQL(
+                    f"Columna '{izquierda.value}' sin tabla o alias en JOIN. Usa U.id = C.id",
+                    izquierda, 'COLUMNA_SIN_CALIFICAR'
+                )
+        self.columna(False)
+        op = self.actual()
+        if not op or op.value not in COMPARADORES:
+            raise ErrorSQL('Se esperaba operador de comparación',
+                        op or Token('', self.final, self.final, 'EOF'))
+        self.tomar()
+        derecha = self.actual()
+        if en_join:
+            if derecha is None or derecha.kind != 'ID':
+                raise ErrorSQL('JOIN requiere columna calificada en ambos lados',
+                            derecha or Token('', self.final, self.final, 'EOF'),
+                            'COLUMNA_SIN_CALIFICAR')
+            siguiente = self.t[self.i + 1] if self.i + 1 < len(self.t) else None
+            if siguiente is None or siguiente.value != '.':
+                raise ErrorSQL(
+                    f"Columna '{derecha.value}' sin tabla o alias en JOIN. Usa U.id = C.id",
+                    derecha, 'COLUMNA_SIN_CALIFICAR'
+                )
+        self.valor()
+
+    def analizar(self):
+        self.tomar('SELECT')
+        self.columna()
+        while self.aceptar(','):
+            self.usadas.add('SQL_02')
+            self.columna()
+        self.tomar('FROM')
+        self.origen()
+        while self.palabra() in ('INNER', 'JOIN'):
+            self.usadas.add('SQL_09')
+            self.aceptar('INNER')
+            self.tomar('JOIN')
+            self.origen()
+            self.tomar('ON')
+            self.comparacion(en_join=True)
+        if self.aceptar('WHERE'):
+            self.usadas.add('SQL_04')
+            self.condicion()
+        if self.aceptar('GROUP'):
+            self.usadas.add('SQL_07')
+            self.tomar('BY')
+            self.columna(False)
+            while self.aceptar(','):
+                self.columna(False)
+        if self.aceptar('HAVING'):
+            self.usadas.add('SQL_08')
+            if 'SQL_07' not in self.usadas:
+                raise ErrorSQL('HAVING requiere GROUP BY', self.t[self.i - 1])
+            self.condicion()
+        if self.aceptar('ORDER'):
+            self.usadas.add('SQL_06')
+            self.tomar('BY')
+            self.columna(False)
+            if self.palabra() in ('ASC', 'DESC'):
+                self.tomar()
+            while self.aceptar(','):
+                self.columna(False)
+                if self.palabra() in ('ASC', 'DESC'):
+                    self.tomar()
+        if self.aceptar('LIMIT'):
+            self.usadas.add('SQL_10')
+            n = self.actual()
+            if not n or n.kind != 'NUM' or not n.value.isdigit():
+                raise ErrorSQL('LIMIT requiere un entero',
+                            n or Token('', self.final, self.final, 'EOF'))
+            self.tomar()
+        if self.actual():
+            raise ErrorSQL('Token inesperado: ' + self.actual().value, self.actual())
+        for ref in self.referencias:
+            if ref.value.casefold() not in self.tablas:
+                raise ErrorSQL('Alias o tabla no declarada: ' + ref.value,
+                            ref, 'ALIAS_NO_DECLARADO')
+        return sorted(self.usadas)
+
+def _sentencias(tokens):
+    grupos = []
+    actual = []
+    for t in tokens:
+        if t.value == ';':
+            if actual:
+                grupos.append(actual)
+                actual = []
+        else:
+            actual.append(t)
+    if actual:
+        grupos.append(actual)
+    return grupos
+
+def validar(sql, activas):
+    """Valida múltiples SELECT separadas por ';' con posiciones absolutas base cero."""
+    try:
+        tokens = _tokens(sql)
+    except ErrorSQL as e:
+        return {'valido': False, 'codigo': e.codigo, 'mensaje': str(e),
+                **_ubicacion(sql, e.token.start), 'sentencias': [], 'total': 0}
+    grupos = _sentencias(tokens)
+    if not grupos:
+        return {'valido': False, 'codigo': 'SQL_VACIO', 'mensaje': 'No se ingresaron consultas',
+                'linea': 1, 'columna': 1, 'posicion': 0, 'sentencias': [], 'total': 0}
+    resultados = []
+    for numero, grupo in enumerate(grupos, 1):
+        p = Parser(grupo, grupo[-1].end)
+        inicio = _ubicacion(sql, grupo[0].start)
+        r = {'numero': numero, 'inicio': inicio,
+            'consulta': sql[grupo[0].start:grupo[-1].end]}
+        try:
+            usadas = p.analizar()
+            inactivas = sorted(set(usadas) - set(activas))
+            if inactivas:
+                raise ErrorSQL('Reglas inactivas: ' + ', '.join(inactivas),
+                            grupo[0], 'REGLA_INACTIVA')
+            r.update(valido=True, codigo='OK', mensaje='Consulta válida', reglas_usadas=usadas)
+        except ErrorSQL as e:
+            donde = _ubicacion(sql, e.token.start if e.token else grupo[0].start)
+            r.update(valido=False, codigo=e.codigo, mensaje=str(e),
+                     reglas_usadas=sorted(p.usadas), **donde)
+        resultados.append(r)
+    errores = [r for r in resultados if not r['valido']]
+    respuesta = {
+        'valido': not errores, 'codigo': 'OK' if not errores else 'ERROR_SQL',
+        'mensaje': f'{len(resultados)-len(errores)} de {len(resultados)} consultas válidas',
+        'total': len(resultados), 'correctas': len(resultados)-len(errores),
+        'errores': len(errores), 'sentencias': resultados,
+    }
+    if len(resultados) == 1:
+        unico = resultados[0]
+        respuesta.update(codigo=unico['codigo'], mensaje=unico['mensaje'],
+                        reglas_usadas=unico.get('reglas_usadas', []))
+        if not unico['valido']:
+            for campo in ('linea', 'columna', 'posicion'):
+                respuesta[campo] = unico[campo]
+    return respuesta
