@@ -7,11 +7,11 @@ REGLAS = [
     ('SQL_03', 'Comodín *'), ('SQL_04', 'WHERE y comparación'),
     ('SQL_05', 'AND / OR'), ('SQL_06', 'ORDER BY'),
     ('SQL_07', 'GROUP BY'), ('SQL_08', 'HAVING'),
-    ('SQL_09', 'INNER JOIN'), ('SQL_10', 'LIMIT'),
+    ('SQL_09', 'JOIN (INNER / LEFT / RIGHT / FULL)'), ('SQL_10', 'LIMIT'),
 ]
 COMPARADORES = {'=', '>', '<', '>=', '<=', '!=', '<>'}
 PALABRAS = {
-    'SELECT', 'FROM', 'WHERE', 'INNER', 'JOIN', 'ON', 'AS', 'ORDER',
+    'SELECT', 'FROM', 'WHERE', 'INNER', 'LEFT', 'RIGHT', 'FULL', 'OUTER', 'JOIN', 'ON', 'AS', 'ORDER',
     'GROUP', 'BY', 'HAVING', 'LIMIT', 'AND', 'OR', 'ASC', 'DESC'
 }
 LEX = re.compile(
@@ -74,7 +74,7 @@ class Parser:
         x = self.actual()
         if x is None or (valor is not None and x.value.upper() != valor):
             raise ErrorSQL('Se esperaba ' + (valor or 'un token'),
-                        x or Token('', self.final, self.final, 'EOF'))
+                           x or Token('', self.final, self.final, 'EOF'))
         self.i += 1
         return x
 
@@ -88,7 +88,7 @@ class Parser:
         x = self.actual()
         if x is None or x.kind != 'ID' or x.value.upper() in PALABRAS:
             raise ErrorSQL('Se esperaba un identificador',
-                        x or Token('', self.final, self.final, 'EOF'))
+                           x or Token('', self.final, self.final, 'EOF'))
         return self.tomar()
 
     def columna(self, admitir_comodin=True):
@@ -161,14 +161,14 @@ class Parser:
         op = self.actual()
         if not op or op.value not in COMPARADORES:
             raise ErrorSQL('Se esperaba operador de comparación',
-                        op or Token('', self.final, self.final, 'EOF'))
+                           op or Token('', self.final, self.final, 'EOF'))
         self.tomar()
         derecha = self.actual()
         if en_join:
             if derecha is None or derecha.kind != 'ID':
                 raise ErrorSQL('JOIN requiere columna calificada en ambos lados',
-                            derecha or Token('', self.final, self.final, 'EOF'),
-                            'COLUMNA_SIN_CALIFICAR')
+                               derecha or Token('', self.final, self.final, 'EOF'),
+                               'COLUMNA_SIN_CALIFICAR')
             siguiente = self.t[self.i + 1] if self.i + 1 < len(self.t) else None
             if siguiente is None or siguiente.value != '.':
                 raise ErrorSQL(
@@ -185,9 +185,14 @@ class Parser:
             self.columna()
         self.tomar('FROM')
         self.origen()
-        while self.palabra() in ('INNER', 'JOIN'):
+        while self.palabra() in ('INNER', 'LEFT', 'RIGHT', 'FULL', 'JOIN'):
             self.usadas.add('SQL_09')
-            self.aceptar('INNER')
+            # JOIN equivale a INNER JOIN. OUTER es opcional en LEFT/RIGHT/FULL.
+            tipo = self.palabra()
+            if tipo != 'JOIN':
+                self.tomar()
+                if tipo in ('LEFT', 'RIGHT', 'FULL'):
+                    self.aceptar('OUTER')
             self.tomar('JOIN')
             self.origen()
             self.tomar('ON')
@@ -221,14 +226,14 @@ class Parser:
             n = self.actual()
             if not n or n.kind != 'NUM' or not n.value.isdigit():
                 raise ErrorSQL('LIMIT requiere un entero',
-                            n or Token('', self.final, self.final, 'EOF'))
+                               n or Token('', self.final, self.final, 'EOF'))
             self.tomar()
         if self.actual():
             raise ErrorSQL('Token inesperado: ' + self.actual().value, self.actual())
         for ref in self.referencias:
             if ref.value.casefold() not in self.tablas:
                 raise ErrorSQL('Alias o tabla no declarada: ' + ref.value,
-                            ref, 'ALIAS_NO_DECLARADO')
+                               ref, 'ALIAS_NO_DECLARADO')
         return sorted(self.usadas)
 
 def _sentencias(tokens):
@@ -261,13 +266,13 @@ def validar(sql, activas):
         p = Parser(grupo, grupo[-1].end)
         inicio = _ubicacion(sql, grupo[0].start)
         r = {'numero': numero, 'inicio': inicio,
-            'consulta': sql[grupo[0].start:grupo[-1].end]}
+             'consulta': sql[grupo[0].start:grupo[-1].end]}
         try:
             usadas = p.analizar()
             inactivas = sorted(set(usadas) - set(activas))
             if inactivas:
                 raise ErrorSQL('Reglas inactivas: ' + ', '.join(inactivas),
-                            grupo[0], 'REGLA_INACTIVA')
+                               grupo[0], 'REGLA_INACTIVA')
             r.update(valido=True, codigo='OK', mensaje='Consulta válida', reglas_usadas=usadas)
         except ErrorSQL as e:
             donde = _ubicacion(sql, e.token.start if e.token else grupo[0].start)
@@ -284,7 +289,7 @@ def validar(sql, activas):
     if len(resultados) == 1:
         unico = resultados[0]
         respuesta.update(codigo=unico['codigo'], mensaje=unico['mensaje'],
-                        reglas_usadas=unico.get('reglas_usadas', []))
+                         reglas_usadas=unico.get('reglas_usadas', []))
         if not unico['valido']:
             for campo in ('linea', 'columna', 'posicion'):
                 respuesta[campo] = unico[campo]
