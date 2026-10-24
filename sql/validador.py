@@ -1,6 +1,6 @@
 """Validador educativo de consultas SELECT; no ejecuta sentencias SQL."""
-import re
 from dataclasses import dataclass
+from .afd_lexico import tokenizar, FalloLexico
 
 REGLAS = [
     ('SQL_01', 'SELECT básico'), ('SQL_02', 'Columnas múltiples'),
@@ -14,12 +14,6 @@ PALABRAS = {
     'SELECT', 'FROM', 'WHERE', 'INNER', 'LEFT', 'RIGHT', 'FULL', 'OUTER', 'JOIN', 'ON', 'AS', 'ORDER',
     'GROUP', 'BY', 'HAVING', 'LIMIT', 'AND', 'OR', 'ASC', 'DESC'
 }
-LEX = re.compile(
-    r"(?P<WS>\s+)|(?P<LINE_COMMENT>--[^\n]*)|(?P<BLOCK_COMMENT>/\*[\s\S]*?\*/)|"
-    r"(?P<STRING>'(?:''|[^'])*')|(?P<NUM>\d+(?:\.\d+)?)|"
-    r"(?P<OP>>=|<=|!=|<>)|(?P<ID>[A-Za-z_][A-Za-z_0-9]*)|"
-    r"(?P<PUNC>[(),;.*=<>+/-])|(?P<OTHER>.)"
-)
 
 @dataclass
 class Token:
@@ -42,16 +36,12 @@ def _ubicacion(texto, indice):
     }
 
 def _tokens(texto):
-    resultado = []
-    for m in LEX.finditer(texto):
-        tipo = m.lastgroup
-        if tipo in ('WS', 'LINE_COMMENT', 'BLOCK_COMMENT'):
-            continue
-        t = Token(m.group(), m.start(), m.end(), tipo)
-        if tipo == 'OTHER':
-            raise ErrorSQL('Carácter no reconocido: ' + t.value, t, 'LEXICO_SQL')
-        resultado.append(t)
-    return resultado
+    """El AFD léxico produce los tokens que consume Parser."""
+    try:
+        return [Token(t.value, t.start, t.end, t.kind) for t in tokenizar(texto)]
+    except FalloLexico as e:
+        t = Token('', e.posicion, e.posicion, 'OTHER')
+        raise ErrorSQL(str(e), t, 'LEXICO_SQL') from e
 
 class Parser:
     def __init__(self, tokens, final):
